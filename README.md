@@ -322,7 +322,7 @@ All `283` catalog tools have an implementation. `tools/list` advertises a small 
 | `list_available_transitions` / `list_available_audio_transitions` | Discover installed transition names. |
 | `add_transition` / `add_transition_to_clip` / `batch_add_transitions` | Add one or many transitions. Results distinguish verified changes from accepted-but-unverified host responses. |
 | `create_caption_track` | Create a caption track from an imported subtitle project item, such as an SRT. |
-| `read_sequence_captions` | Reports scripting-visible caption data and explicitly flags that Premiere's DOM often cannot read existing caption text. |
+| `read_sequence_captions` | Reads every caption cue on a sequence (start, end, text) plus font, size, vertical offset and shadow values, from the saved `.prproj`. Reflects the last save; `saveFirst:true` saves before reading. |
 
 ### Markers, selection, navigation, and playback
 

@@ -41,6 +41,33 @@ Reason:
   intervals with `split_clip`/`ripple_delete`/`razor_timeline_at_time` to actually remove
   silence from a sequence.
 
+### `read_sequence_captions` reads the saved project file, not the live session
+
+Status: by design, not a bug
+
+Reason:
+
+- Premiere's scripting DOM has no caption read API. `createCaptionTrack` can
+  write a caption track, but nothing reads one back: no `captionTracks`, no
+  `getCaptionTracks()`, and caption tracks are absent from `videoTracks` and
+  the QE DOM.
+- The project file does hold every cue. A `.prproj` is gzip-compressed XML;
+  each cue is a `CaptionDataClipTrackItem` with start and end ticks, and its
+  text and styling sit in a base64 FlatBuffer (`FormattedTextData`). The tool
+  asks Premiere only for the project path and frame size, then reads the file.
+- It therefore reflects the project as last saved. Pass `saveFirst: true`, or
+  call `save_project`, to include edits made since. `projectSavedAt` in the
+  result says how current the read is.
+- The FlatBuffer schema is not published. Field positions were mapped by
+  decoding cues whose values were read off the Essential Graphics panel and
+  confirmed against rendered frames. Named and checked: text, font PostScript
+  name, font size, vertical offset (fraction of frame height, converted to
+  pixels), and shadow opacity, distance, size, blur and colour. Not decoded:
+  whether the shadow is switched on, fill, stroke, background, and alignment.
+  The horizontal offset is returned raw because it has only been observed at 0.
+- Track visibility comes from the caption track's `IsMuted` flag, which is how
+  the track output (eye) toggle is saved.
+
 ### QE reaches sequences Premiere has open, not only the active one
 
 Status: corrects an earlier claim in this file

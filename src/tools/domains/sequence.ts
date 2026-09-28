@@ -6,6 +6,7 @@
  */
 import { z } from 'zod';
 import type { ToolContext, ToolModule } from '../context.js';
+import { loadProjectIndex, readSequenceCaptionsFromIndex } from '../../utils/prproj-captions.js';
 
 export const sequenceTools: ToolModule[] = [
   {
@@ -145,11 +146,13 @@ export const sequenceTools: ToolModule[] = [
   },
   {
     name: 'read_sequence_captions',
-    description: 'Reads caption tracks of a sequence, returning each caption clip as { start, end, text } in seconds. IMPORTANT: Premiere Pro exposes no caption-read API in its scripting DOM, so in practice this returns trackCount:0 / captions:[] even when the sequence HAS a working caption track. The response field captionReadSupported:false (plus note) signals this — a 0 result does NOT mean the sequence has no captions. To read cue text/timing, parse the source .srt file directly instead.',
+    description: 'Reads every caption track on a sequence: each cue\'s start, end and text in seconds, plus its font (PostScript name), font size, vertical position offset and shadow values. Premiere\'s scripting DOM has no caption read API, so this reads the saved .prproj from disk. It reflects the project as last saved: pass saveFirst:true, or call save_project, to include unsaved edits. Each track reports visible:false when its output is switched off. styles[] on each track groups cues by look, and mixedStyles:true means the visible tracks carry more than one caption look. Style comes from an undocumented format: font, size, offset and shadow values are checked against the Essential Graphics panel; whether the shadow is switched on, fill, stroke and background are not decoded.',
     inputSchema: z.object({
-      sequenceId: z.string().optional().describe('Optional sequence ID. Defaults to the active sequence.')
+      sequenceId: z.string().optional().describe('Optional sequence ID. Defaults to the active sequence.'),
+      includeStyle: z.boolean().optional().describe('Include per-cue style. Default true. Track-level style summaries are always returned.'),
+      saveFirst: z.boolean().optional().describe('Save the project before reading so unsaved caption edits are included. Default false, because saving writes the project file.')
     }),
-    run: (ctx, args) => readSequenceCaptions(ctx, args.sequenceId),
+    run: (ctx, args) => readSequenceCaptions(ctx, args.sequenceId, args.includeStyle, args.saveFirst),
   },
 ];
 
@@ -311,8 +314,11 @@ async function duplicateSequence(ctx: ToolContext, sequenceId: string, newName: 
   return await ctx.bridge.executeScript(script);
 }
 
-async function readSequenceCaptions(ctx: ToolContext, sequenceId?: string): Promise<any> {
+async function readSequenceCaptions(ctx: ToolContext, sequenceId?: string, includeStyle?: boolean, saveFirst?: boolean): Promise<any> {
   const seqArg = sequenceId ? JSON.stringify(sequenceId) : 'null';
+  // ExtendScript only resolves the sequence and the project path. The
+  // captions themselves are read from the saved project file below, because
+  // the scripting DOM has no caption read API.
   const script = `
       try {
         // A supplied ID that does not resolve must fail. Falling back to the
@@ -332,97 +338,56 @@ async function readSequenceCaptions(ctx: ToolContext, sequenceId?: string): Prom
         }
         if (!sequence) return JSON.stringify({ success: false, error: "No active sequence" });
 
-        // Premiere caption tracks live alongside video/audio tracks. Different
-        // Premiere versions expose them differently:
-        //   - sequence.getCaptionTracks() (newer)
-        //   - sequence.captionTracks (some builds)
-        //   - sequence.videoTracks[i] with isCaptioning style flag
-        // Try in that order, return whatever yields {start, end, text} clips.
-
-        var tracks = [];
-        try {
-          if (sequence.getCaptionTracks) {
-            tracks = sequence.getCaptionTracks();
-          } else if (sequence.captionTracks) {
-            tracks = sequence.captionTracks;
-          }
-        } catch (_) { /* fall through to track scan */ }
-
-        // Fallback: scan video tracks for caption clip data
-        if ((!tracks || tracks.length === 0) && sequence.videoTracks) {
-          for (var v = 0; v < sequence.videoTracks.numTracks; v++) {
-            var t = sequence.videoTracks[v];
-            if (t && (t.isCaption || t.captionTrack || (t.name && /caption/i.test(t.name)))) {
-              tracks.push(t);
-            }
-          }
-        }
-
-        var trackCount = tracks ? tracks.length : 0;
-        var output = [];
-
-        for (var i = 0; i < trackCount; i++) {
-          var trk = tracks[i];
-          if (!trk) continue;
-          var clips = trk.clips || trk.captions || [];
-          var clipCount = clips.numItems !== undefined ? clips.numItems : (clips.length || 0);
-          for (var c = 0; c < clipCount; c++) {
-            var clip = clips[c];
-            if (!clip) continue;
-            var startSec = null;
-            var endSec = null;
-            try {
-              if (clip.start && clip.start.seconds !== undefined) startSec = clip.start.seconds;
-              else if (clip.start && clip.start.ticks) startSec = parseFloat(clip.start.ticks) / 254016000000.0;
-              else if (typeof clip.startTime === 'number') startSec = clip.startTime;
-            } catch (_) {}
-            try {
-              if (clip.end && clip.end.seconds !== undefined) endSec = clip.end.seconds;
-              else if (clip.end && clip.end.ticks) endSec = parseFloat(clip.end.ticks) / 254016000000.0;
-              else if (typeof clip.endTime === 'number') endSec = clip.endTime;
-            } catch (_) {}
-
-            var text = "";
-            try {
-              if (typeof clip.text === 'string') text = clip.text;
-              else if (clip.captionText) text = clip.captionText;
-              else if (clip.name) text = clip.name;
-            } catch (_) {}
-
-            output.push({
-              trackIndex: i,
-              start: startSec,
-              end: endSec,
-              text: text
-            });
-          }
-        }
-
-        // Premiere Pro exposes NO caption-read API in its scripting DOM (confirmed
-        // Adobe limitation — see Bruce Bullis 2021/2023 and the UXP CaptionTrack
-        // thread, 2025). createCaptionTrack can WRITE a caption track from an SRT,
-        // but there is no read counterpart: no sequence.captionTracks, no
-        // getCaptionTracks(), and caption tracks are not surfaced in videoTracks or
-        // the QE DOM. So trackCount will essentially always be 0 here. Report that
-        // honestly via captionReadSupported + note instead of implying "no captions".
-        var captionReadSupported = trackCount > 0;
-        var note = captionReadSupported ? "" : "Premiere Pro exposes no caption-read API in its scripting DOM, so caption tracks cannot be enumerated or read back from a sequence (Adobe limitation: createCaptionTrack can write a track, but there is no read counterpart). trackCount:0 does NOT mean the sequence has no captions — it may have a working, rendering caption track that is simply unreadable via script. To recover cue text/timing, parse the source .srt file off disk instead.";
+        var saved = false;
+        ${saveFirst ? 'app.project.save(); saved = true;' : ''}
 
         return JSON.stringify({
           success: true,
-          sequenceId: sequence.sequenceID,
+          sequenceId: String(sequence.sequenceID),
           sequenceName: sequence.name,
-          captionReadSupported: captionReadSupported,
-          trackCount: trackCount,
-          captionCount: output.length,
-          captions: output,
-          note: note
+          projectPath: app.project.path,
+          frameWidth: sequence.frameSizeHorizontal,
+          frameHeight: sequence.frameSizeVertical,
+          savedFirst: saved
         });
       } catch (e) {
         return JSON.stringify({ success: false, error: e.toString() });
       }
     `;
-  return await ctx.bridge.executeScript(script);
+  const located: any = await ctx.bridge.executeScript(script);
+  if (!located || located.success === false) return located;
+  if (!located.projectPath) {
+    return { ...located, success: false, error: 'The project has never been saved, so there is no project file to read captions from. Save it first.' };
+  }
+
+  const base = {
+    sequenceId: located.sequenceId,
+    sequenceName: located.sequenceName,
+    projectPath: located.projectPath,
+    frameWidth: located.frameWidth,
+    frameHeight: located.frameHeight,
+    savedFirst: located.savedFirst === true,
+  };
+
+  try {
+    const { index, savedAt } = await loadProjectIndex(located.projectPath);
+    const read = readSequenceCaptionsFromIndex(index, located.sequenceId, {
+      frameHeight: Number(located.frameHeight) || null,
+      includeStyle: includeStyle !== false,
+    });
+    if (!read.success) return { ...base, ...read };
+    return {
+      ...base,
+      ...read,
+      captionReadSupported: true,
+      source: 'saved project file',
+      projectSavedAt: savedAt.toISOString(),
+      note: 'Read from the project file as last saved. Caption edits made since then are not included unless saveFirst was true.',
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ...base, success: false, captionReadSupported: false, error: `Could not read captions from the project file: ${message}` };
+  }
 }
 
 async function deleteSequence(ctx: ToolContext, sequenceId: string): Promise<any> {

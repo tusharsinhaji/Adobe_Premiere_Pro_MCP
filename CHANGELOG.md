@@ -4,6 +4,17 @@ All notable changes are documented here. Releases use semantic versioning.
 
 ## [Unreleased]
 
+- `read_sequence_captions` now returns real captions. Premiere's scripting DOM
+  has no caption read API, so the tool used to report `trackCount: 0` for
+  sequences that had working caption tracks. It now asks Premiere only for the
+  project path, then reads the saved `.prproj` from disk: every caption track
+  with its visibility, and every cue's start, end and text. Each cue also
+  carries its font (PostScript name), size, vertical offset in pixels and
+  shadow values, and each track summarises its distinct looks, with
+  `mixedStyles` flagging more than one look across visible tracks. Style comes
+  from Premiere's undocumented caption payload; see `KNOWN_ISSUES.md` for what
+  is and is not decoded. New `saveFirst` and `includeStyle` arguments.
+
 ## [1.2.8] - 2026-09-02
 
 - `move_clip_to_track` parks past the last clip on the destination, restores
